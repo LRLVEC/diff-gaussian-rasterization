@@ -3,7 +3,7 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -68,6 +68,65 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 	clamped[3 * idx + 1] = (result.y < 0);
 	clamped[3 * idx + 2] = (result.z < 0);
 	return glm::max(result, 0.0f);
+}
+
+__device__ glm::vec2 projectFisheye(glm::vec3 t, float focal_x, float focal_y, glm::vec4 k)
+{
+	float a = t.x / t.z;
+	float b = t.y / t.z;
+	float r = a * a + b * b;
+	float s = atanf(r);
+	float s2 = s * s;
+	float s4 = s2 * s2;
+	float s6 = s4 * s2;
+	float s8 = s4 * s4;
+	float sA = s * (1 + k.x * s2 + k.y * s4 + k.z * s6 + k.w * s8);
+	return glm::vec2(sA * a / r, sA * b / r);
+}
+
+__device__ glm::mat3 computeJacobianPerspective(glm::vec3 t, float focal_x, float focal_y)
+{
+	return glm::mat3(
+		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+		0, 0, 0);
+}
+
+__device__ glm::mat3 computeJacobianFisheye(glm::vec3 t, float focal_x, float focal_y, glm::vec4 k)
+{
+	float z = t.z;
+	float a = t.x / t.z;
+	float b = t.y / t.z;
+	float a2 = a * a;
+	float b2 = b * b;
+	float ab = a * b;
+	float r2 = a2 + b2;
+	float r = sqrtf(r);
+	float s = atanf(r);
+	float s2 = s * s;
+	float s4 = s2 * s2;
+	float s6 = s4 * s2;
+	float s8 = s4 * s4;
+	float A = 1 + k.x * s2 + k.y * s4 + k.z * s6 + k.w * s8;
+	float B = k.x * s2 + 2 * k.y * s4 + 3 * k.z * s6 + 4 * k.w * s8;
+	float C = 1 + 3 * k.x * s2 + 5 * k.y * s4 + 7 * k.z * s6 + 9 * k.w * s8;
+	float d0 = r2 * (1 + r2) * z;
+	float d1 = r2 * r * z;
+	float d3 = dot(t, t);
+	float C1 = 2 * B / d0;
+	float C2 = A / d0;
+	float C3 = s * A / d1;
+	float C4 = C / d3;
+	float J00 = (C1 + C2) * a2 + C3 * b2;
+	float J01 = (C1 + C2 - C3) * ab;
+	float J02 = -t.x * C4;
+	float J10 = (C1 + C2) * b2 + C3 * a2;
+	float J11 = (C1 + C2 - C3) * ab;
+	float J12 = -t.y * C4;
+	return glm::mat3(
+		focal_x * J00, focal_x * J01, focal_x * J02,
+		focal_y * J10, focal_y * J11, focal_y * J12,
+		0, 0, 0);
 }
 
 // Forward version of 2D covariance matrix computation
@@ -169,6 +228,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const int W, int H,
 	const float tan_fovx, float tan_fovy,
 	const float focal_x, float focal_y,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	int* radii,
 	float2* points_xy_image,
 	float* depths,
@@ -192,7 +255,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float3 p_view;
 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
 		return;
-
+	// todo
 	// Transform point by projecting
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
@@ -259,7 +322,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
 template <uint32_t CHANNELS>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+__global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -284,7 +347,7 @@ renderCUDA(
 	float2 pixf = { (float)pix.x, (float)pix.y };
 
 	// Check if this thread is associated with a valid pixel or outside.
-	bool inside = pix.x < W&& pix.y < H;
+	bool inside = pix.x < W && pix.y < H;
 	// Done threads can help with fetching, but don't rasterize
 	bool done = !inside;
 
@@ -374,7 +437,7 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
-		out_depth[pix_id] = D;
+		out_depth[pix_id] = D / (T >= 1.f ? 1 : 1 - T);
 	}
 }
 
@@ -424,6 +487,10 @@ void FORWARD::preprocess(int P, int D, int M,
 	const int W, int H,
 	const float focal_x, float focal_y,
 	const float tan_fovx, float tan_fovy,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	int* radii,
 	float2* means2D,
 	float* depths,
@@ -445,12 +512,13 @@ void FORWARD::preprocess(int P, int D, int M,
 		clamped,
 		cov3D_precomp,
 		colors_precomp,
-		viewmatrix, 
+		viewmatrix,
 		projmatrix,
 		cam_pos,
 		W, H,
 		tan_fovx, tan_fovy,
 		focal_x, focal_y,
+		k1, k2, k3, k4,
 		radii,
 		means2D,
 		depths,

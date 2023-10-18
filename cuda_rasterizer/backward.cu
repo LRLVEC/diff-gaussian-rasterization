@@ -3,7 +3,7 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -147,6 +147,11 @@ __global__ void computeCov2DCUDA(int P,
 	const float* cov3Ds,
 	const float h_x, float h_y,
 	const float tan_fovx, float tan_fovy,
+	const float focalx, const float focaly,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	const float* view_matrix,
 	const float* dL_dconics,
 	float3* dL_dmeans,
@@ -164,14 +169,14 @@ __global__ void computeCov2DCUDA(int P,
 	float3 mean = means[idx];
 	float3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };
 	float3 t = transformPoint4x3(mean, view_matrix);
-	
+
 	const float limx = 1.3f * tan_fovx;
 	const float limy = 1.3f * tan_fovy;
 	const float txtz = t.x / t.z;
 	const float tytz = t.y / t.z;
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
-	
+
 	const float x_grad_mul = txtz < -limx || txtz > limx ? 0 : 1;
 	const float y_grad_mul = tytz < -limy || tytz > limy ? 0 : 1;
 
@@ -354,6 +359,11 @@ __global__ void preprocessCUDA(
 	const glm::vec4* rotations,
 	const float scale_modifier,
 	const float* proj,
+	const float focalx, const float focaly,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	const glm::vec3* campos,
 	const float3* dL_dmean2D,
 	glm::vec3* dL_dmeans,
@@ -368,7 +378,7 @@ __global__ void preprocessCUDA(
 		return;
 
 	float3 m = means[idx];
-
+	// todo
 	// Taking care of gradients from the screenspace points
 	float4 m_hom = transformPoint4x4(m, proj);
 	float m_w = 1.0f / (m_hom.w + 0.0000001f);
@@ -397,7 +407,7 @@ __global__ void preprocessCUDA(
 
 // Backward version of the rendering procedure.
 template <uint32_t C>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+__global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -425,7 +435,7 @@ renderCUDA(
 	const uint32_t pix_id = W * pix.y + pix.x;
 	const float2 pixf = { (float)pix.x, (float)pix.y };
 
-	const bool inside = pix.x < W&& pix.y < H;
+	const bool inside = pix.x < W && pix.y < H;
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -456,7 +466,7 @@ renderCUDA(
 	if (inside)
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
-	        dL_depth = dL_depths[pix_id];
+	dL_depth = dL_depths[pix_id];
 
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
@@ -482,7 +492,7 @@ renderCUDA(
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
-		        collected_depths[block.thread_rank()] = depths[coll_id];
+			collected_depths[block.thread_rank()] = depths[coll_id];
 		}
 		block.sync();
 
@@ -582,6 +592,10 @@ void BACKWARD::preprocess(
 	const float* projmatrix,
 	const float focal_x, float focal_y,
 	const float tan_fovx, float tan_fovy,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	const glm::vec3* campos,
 	const float3* dL_dmean2D,
 	const float* dL_dconic,
@@ -605,6 +619,8 @@ void BACKWARD::preprocess(
 		focal_y,
 		tan_fovx,
 		tan_fovy,
+		focal_x, focal_y,
+		k1, k2, k3, k4,
 		viewmatrix,
 		dL_dconic,
 		(float3*)dL_dmean3D,
@@ -623,6 +639,8 @@ void BACKWARD::preprocess(
 		(glm::vec4*)rotations,
 		scale_modifier,
 		projmatrix,
+		focal_x, focal_y,
+		k1, k2, k3, k4,
 		campos,
 		(float3*)dL_dmean2D,
 		(glm::vec3*)dL_dmean3D,
@@ -652,7 +670,7 @@ void BACKWARD::render(
 	float* dL_dopacity,
 	float* dL_dcolors)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
 		W, H,

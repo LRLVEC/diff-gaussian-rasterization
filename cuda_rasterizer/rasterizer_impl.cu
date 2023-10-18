@@ -3,7 +3,7 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -214,14 +214,28 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* projmatrix,
 	const float* cam_pos,
 	const float tan_fovx, float tan_fovy,
+	const float focalx, const float focaly,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	const bool prefiltered,
 	float* out_color,
 	float* out_depth,
 	int* radii,
 	bool debug)
 {
-	const float focal_y = height / (2.0f * tan_fovy);
-	const float focal_x = width / (2.0f * tan_fovx);
+	float focal_x, focal_y;
+	if (k1 == 0.f && k2 == 0.f && k3 == 0.f && k4 == 0.f)
+	{
+		focal_y = height / (2.0f * tan_fovy);
+		focal_x = width / (2.0f * tan_fovx);
+	}
+	else
+	{
+		focal_x = focalx;
+		focal_y = focaly;
+	}
 
 	size_t chunk_size = required<GeometryState>(P);
 	char* chunkptr = geometryBuffer(chunk_size);
@@ -262,6 +276,7 @@ int CudaRasterizer::Rasterizer::forward(
 		width, height,
 		focal_x, focal_y,
 		tan_fovx, tan_fovy,
+		k1, k2, k3, k4,
 		radii,
 		geomState.means2D,
 		geomState.depths,
@@ -271,11 +286,11 @@ int CudaRasterizer::Rasterizer::forward(
 		tile_grid,
 		geomState.tiles_touched,
 		prefiltered
-	), debug)
+	), debug);
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug);
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	int num_rendered;
@@ -296,7 +311,7 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.point_list_unsorted,
 		radii,
 		tile_grid)
-	CHECK_CUDA(, debug)
+		CHECK_CUDA(, debug);
 
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
@@ -306,7 +321,7 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
-		num_rendered, 0, 32 + bit), debug)
+		num_rendered, 0, 32 + bit), debug);
 
 	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
 
@@ -316,7 +331,7 @@ int CudaRasterizer::Rasterizer::forward(
 			num_rendered,
 			binningState.point_list_keys,
 			imgState.ranges);
-	CHECK_CUDA(, debug)
+	CHECK_CUDA(, debug);
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
@@ -333,7 +348,7 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		background,
 		out_color,
-		out_depth), debug)
+		out_depth), debug);
 
 	return num_rendered;
 }
@@ -355,6 +370,11 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* projmatrix,
 	const float* campos,
 	const float tan_fovx, float tan_fovy,
+	const float focalx, const float focaly,
+	const float k1,
+	const float k2,
+	const float k3,
+	const float k4,
 	const int* radii,
 	char* geom_buffer,
 	char* binning_buffer,
@@ -381,8 +401,17 @@ void CudaRasterizer::Rasterizer::backward(
 		radii = geomState.internal_radii;
 	}
 
-	const float focal_y = height / (2.0f * tan_fovy);
-	const float focal_x = width / (2.0f * tan_fovx);
+	float focal_x, focal_y;
+	if (k1 == 0.f && k2 == 0.f && k3 == 0.f && k4 == 0.f)
+	{
+		focal_y = height / (2.0f * tan_fovy);
+		focal_x = width / (2.0f * tan_fovx);
+	}
+	else
+	{
+		focal_x = focalx;
+		focal_y = focaly;
+	}
 
 	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	const dim3 block(BLOCK_X, BLOCK_Y, 1);
@@ -410,7 +439,7 @@ void CudaRasterizer::Rasterizer::backward(
 		(float3*)dL_dmean2D,
 		(float4*)dL_dconic,
 		dL_dopacity,
-		dL_dcolor), debug)
+		dL_dcolor), debug);
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
@@ -429,6 +458,7 @@ void CudaRasterizer::Rasterizer::backward(
 		projmatrix,
 		focal_x, focal_y,
 		tan_fovx, tan_fovy,
+		k1, k2, k3, k4,
 		(glm::vec3*)campos,
 		(float3*)dL_dmean2D,
 		dL_dconic,
